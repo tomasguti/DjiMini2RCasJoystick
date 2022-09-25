@@ -1,24 +1,17 @@
-import serial, argparse, binascii, struct, sys, time, uinput
-from threading import Thread
+import serial, argparse, struct, pyvjoy
 
-parser = argparse.ArgumentParser(description='DJI Mini 2 RC (also known as RC-N1, RCS231, WM161b-RC-N1, RCN1) <-> Linux joystick interface (uinput)')
+parser = argparse.ArgumentParser(description='DJI Mini 2 RC (also known as RC-N1, RCS231, WM161b-RC-N1, RCN1) <-> VJoy interface.')
 
 parser.add_argument('-p', '--port', help='RC Serial Port', required=True)
+parser.add_argument('-d', '--device', help='VJoy Device ID', type=int, default=1)
+parser.add_argument('-i', '--invert', help='Invert lv, lh, rv, rh, or cam axis', nargs='*', default=['lv', 'rv'])
 
 args = parser.parse_args()
 
+invert = frozenset(args.invert)
+
+# Maximum value for VJoy to handle (0x8000)
 maxValue = 32768
-
-events = (
-    uinput.BTN_JOYSTICK,
-    uinput.ABS_X + (0, 32767, 0, 0),
-    uinput.ABS_Y + (0, 32767, 0, 0),
-    uinput.ABS_THROTTLE + (0, 32767, 0, 0),
-    uinput.ABS_RUDDER + (0, 32767, 0, 0),
-    )
-
-device = uinput.Device(events)
-time.sleep(1)
 
 def calc_checksum(packet, plength):
 
@@ -130,6 +123,14 @@ except serial.SerialException as e:
     print('Could not open serial device:', e)
     exit(1)
 
+# Open VJoy device.
+try:
+    j = pyvjoy.VJoyDevice(args.device)
+    print('Opened VJoy device:', j.rID)
+except pyvjoy.exceptions.vJoyException as e:
+    print('Could not open VJoy device:', e)
+    exit(1)
+
 # Stylistic: Newline for spacing.
 print('\nPress Ctrl+C (or interrupt) to stop.\n')
 
@@ -137,22 +138,11 @@ print('\nPress Ctrl+C (or interrupt) to stop.\n')
 def parseInput(input, name):
     output = (int.from_bytes(input, byteorder='little') - 364) * 4096 // 165
 
+    # Invert axes (Windows detected lv and rv as inverted originally)
+    if name in invert:
+        output = maxValue - output
+
     return output
-
-st = {"rh": 0, "rv": 0, "lh": 0, "lv": 0}
-
-def threaded_function():
-    while(True):
-        time.sleep(0.1)
-        #print("working ...")
-        device.emit(uinput.ABS_X, int(st["lh"]), syn=False)
-        device.emit(uinput.ABS_Y, int(st["lv"]), syn=False)
-        device.emit(uinput.ABS_THROTTLE, int(st["rh"]), syn=False)
-        device.emit(uinput.ABS_RUDDER, int(st["rv"]))
-
-thread = Thread(target = threaded_function, args = ())
-thread.start()
-#thread.join()
 
 try:
     # enable simulator mode for RC (without this stick positions are sent very slow by RC)
@@ -192,13 +182,25 @@ try:
         # Reverse-engineered. Controller input seems to always be len 38.
         if len(data) == 38:
             # Reverse-engineered
-            st["rh"] = parseInput(data[13:15], 'lv')
-            st["rv"] = parseInput(data[16:18], 'lh')
+            left_vertical = parseInput(data[13:15], 'lv')
+            left_horizontal = parseInput(data[16:18], 'lh')
 
-            st["lv"] = parseInput(data[19:21], 'rv')
-            st["lh"] = parseInput(data[22:24], 'rh')
+            right_vertical = parseInput(data[19:21], 'rv')
+            right_horizontal = parseInput(data[22:24], 'rh')
 
             camera = parseInput(data[25:27], 'cam')
+
+            # TODO: Implement buttons (couldn't find while reverse-engineering).
+
+            # Update VJoy input.
+            j.data.wAxisX = left_horizontal
+            j.data.wAxisY = left_vertical
+            j.data.wAxisXRot = right_horizontal
+            j.data.wAxisYRot = right_vertical
+            j.data.wSlider = camera
+
+            # Send VJoy input update.
+            j.update()
 
 #            print(st)
             #with uinput.Device(events) as device:
